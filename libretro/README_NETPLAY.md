@@ -2,8 +2,9 @@
 
 Enable **RetroArch Netplay (Experimental, Restart)** in the core's Network
 options, close content, and restart it. Every participant must use this core
-build and the same game revision. Connect the RetroArch Netplay session **before
-entering the game's wireless/ad hoc menus**. Each player controls a separate
+build and the same game revision. This downstream build waits for the
+RetroArch Netplay session before executing PSP code, so the player identity
+is assigned before a game can cache it. Each player controls a separate
 emulated PSP using local controller port 1.
 
 The option defaults to disabled. It requires a frontend implementing
@@ -11,7 +12,10 @@ The option defaults to disabled. It requires a frontend implementing
 unsupported frontend rejects content loading when the option is enabled.
 WLAN, MAC addresses, PRO server, relay mode, UPnP and port offsets are managed
 by the transport while enabled. Normal in-game memory-stick saves still work;
-emulator savestates are disabled in this mode. Restart content after ending a
+ordinary emulator savestates are disabled in this mode. The downstream
+[NelfePlay checkpoint loader](../docs/nelfeplay-netpacket-resume.md) supports
+coordinated two-player PDP/GameMode capture and fresh-session starts.
+Restart content after ending a
 session, or before switching the option off.
 
 This is a prototype for testing. Passing transport and emulator regression
@@ -50,7 +54,7 @@ poll callback drain them; no worker calls frontend functions. PTP connects
 return immediately and progress as packets arrive. Stop closes
 pending connections without waiting for a frontend callback. The host's local
 messages use the same wire decoder as remote messages. Protocol compatibility
-is advertised as `ppsspp-adhoc-experimental-2`.
+is advertised as `ppsspp-nelfeplay-checkpoint-1` in this downstream branch.
 
 The main regression risks are endpoint ownership during teardown, PSP
 network timing, games caching MAC addresses before session start, and differences
@@ -111,11 +115,17 @@ python test.py -g --graphics=software
 
 ## RetroBat test installation
 
-Close RetroBat and RetroArch first. Back up the installed
-`emulators/retroarch/cores/ppsspp_libretro.dll` and the game's memory-stick saves.
-Install the experimental DLL under the same filename and ensure RetroBat's PSP
-emulator selection is **LIBRETRO / PPSSPP**. The standalone **PPSSPP** selection
-does not load this core. The RetroArch and DLL architectures must both be x64.
+Close RetroBat and RetroArch first and back up the game's memory-stick saves.
+The test package uses **ppsspp_netplay_libretro.dll** and a matching `.info`;
+keep the solo PPSSPP core separate. For a manual test, place the DLL and license
+in RetroArch's `cores` directory and the `.info` in its `info` directory, then
+load this core explicitly in RetroArch. In a NelfePlay installation with the
+API wrapper, use the API's `tools/cores` delivery mechanism; do not overwrite a
+wrapper DLL in `cores`. The API may keep the real core in `cores_real`.
+After installation, select **LIBRETRO / PPSSPP_NETPLAY** where available.
+The standalone **PPSSPP** selection does not load this core. RetroArch and
+the DLL must both be x64. Validate this candidate before replacing the
+currently distributed NelfePlay package.
 
 Keep the core's required PPSSPP assets in the system directory configured by
 RetroArch (usually a `PPSSPP` directory beneath it). Enable the experimental
@@ -126,6 +136,6 @@ along with the game ID/revision, core version, frontend version, video driver,
 and whether the failure was connecting the salon, discovering the PSP player,
 or starting the match.
 
-To revert, close RetroArch, restore the original DLL, and disable/remove
-`ppsspp_retroarch_netplay` in the core options. Avoid updating the core through
-the online updater while testing: it would replace the experimental DLL.
+To revert, close RetroArch and select the ordinary PPSSPP core, or restore
+your previous NelfePlay package. Disable the challenge start/capture options
+when running an ordinary session. Do not mix builds or old checkpoint files.

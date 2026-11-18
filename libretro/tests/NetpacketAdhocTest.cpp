@@ -288,10 +288,55 @@ static void NonblockingStreams() {
 	puts("PASS nonblocking connect, stream boundaries, close with unread data, cancel and refusal");
 }
 
+static void RestoredGroup() {
+	NetpacketAdhoc nodes[2];
+	void *controls[2], *sockets[2];
+	char names[256] = "Player one", macs[2][6];
+	memcpy(names + 128, "Player two", 11);
+	for (int i = 0; i < 2; ++i) {
+		nodes[i].Start(i);
+		if (!i) CHECK(nodes[i].Connected(1));
+		CHECK(!nodes[i].CheckpointReady());
+		controls[i] = nodes[i].RestoreGroup("TEST00001", "GROUP001", names, 1);
+		CHECK(controls[i] && nodes[i].CheckpointReady());
+		CHECK(!nodes[i].RestoreGroup("TEST00001", "GROUP001", names, 1));
+		adhocctl_event event;
+		nodes[i].ControlEvent(controls[i], &event);
+		CHECK(event.type == ADHOCCTL_CLIENT_EVENT_WOULD_BLOCK); // No duplicate CONNECT after loading.
+		nodes[i].LocalMac(reinterpret_cast<uint8_t *>(macs[i]));
+		int status;
+		sockets[i] = nodes[i].DatagramCreate(3000, &status);
+		CHECK(sockets[i] && status == 0);
+	}
+	CHECK(nodes[0].DatagramSend(sockets[0], macs[1], 3000, "restored", 8) == 0);
+	CHECK(!nodes[0].CheckpointReady()); // Outgoing data must cross the freeze marker first.
+	for (auto &packet : nodes[0].TakePackets()) nodes[1].Receive(packet.data.data(), packet.data.size(), 0);
+	CHECK(nodes[0].CheckpointReady() && !nodes[1].CheckpointReady());
+	char from[6], payload[16];
+	int port, size = sizeof(payload);
+	CHECK(nodes[1].DatagramReceive(sockets[1], from, &port, payload, &size) == 0);
+	CHECK(size == 8 && port == 3000 && !memcmp(payload, "restored", 8));
+	CHECK(nodes[1].CheckpointReady());
+	int status;
+	void *listener = nodes[0].Listen(4000, &status);
+	CHECK(listener && !nodes[0].CheckpointReady()); // PTP cannot be captured by this format.
+	nodes[0].Close(listener);
+	CHECK(nodes[0].CheckpointReady());
+	nodes[0].Disconnected(1);
+	CHECK(!nodes[0].CheckpointReady());
+	for (int i = 0; i < 2; ++i) {
+		nodes[i].Close(sockets[i]);
+		nodes[i].ControlDestroy(controls[i]);
+		nodes[i].Stop();
+	}
+	puts("PASS restored group, fresh endpoints, queued-data and PTP capture guards, disconnect");
+}
+
 int main() {
 	DiscoveryAndDatagrams();
 	Streams();
 	NonblockingStreams();
 	MalformedAndLimits();
+	RestoredGroup();
 	puts("All Netpacket ad hoc tests passed.");
 }

@@ -62,6 +62,7 @@
 #include "Core/HLE/sceKernelInterrupt.h"
 #include "Core/HLE/sceNetAdhoc.h"
 #include "Core/HLE/AdhocTransport.h"
+#include "Core/HLE/AdhocCheckpoint.h"
 #include "Core/HLE/sceNet.h"
 #include "Core/HLE/proAdhocServer.h"
 #include "Core/HLE/KernelWaitHelpers.h"
@@ -1579,6 +1580,245 @@ static void StopFriendFinder() {
 
 	const std::lock_guard<std::mutex> adhocctl_guard(adhocctlMutex);
 	killAdhocctlClient(false, adhocctl_guard);
+}
+
+namespace {
+template <typename T, typename F>
+void CheckpointVector(PointerWrap &p, std::vector<T> &v, u32 limit, F item) {
+	u32 count = (u32)v.size();
+	Do(p, count);
+	if (p.Failed()) return;
+	if (count > limit) {
+		p.SetError(p.ERROR_FAILURE);
+		return;
+	}
+	if (p.mode == p.MODE_READ) v.resize(count);
+	for (auto &value : v) {
+		item(value);
+		if (p.Failed()) return;
+	}
+}
+
+void CheckpointArea(PointerWrap &p, AdhocCheckpoint::Area &area) {
+	auto &a = area.value;
+	p.DoVoid(&a.id, sizeof(a.id)); p.DoVoid(&a.size, sizeof(a.size)); p.DoVoid(&a.addr, sizeof(a.addr));
+	p.DoVoid(&a.updateTimestamp, sizeof(a.updateTimestamp)); p.DoVoid(&a.reportedTimestamp, sizeof(a.reportedTimestamp));
+	p.DoVoid(&a.dataUpdated, sizeof(a.dataUpdated)); p.DoVoid(&a.dataSent, sizeof(a.dataSent));
+	p.DoVoid(&a.mac, sizeof(a.mac));
+	CheckpointVector(p, area.bytes, 0x10000, [&](u8 &b) { Do(p, b); });
+}
+
+int CheckpointPeer(const SceNetEtherAddr &mac) {
+	return mac.data[1] == 0x50 && mac.data[2] == 0x53 && mac.data[3] == 0x50 &&
+		mac.data[4] == 0 && mac.data[5] <= 1 ? mac.data[5] : -1;
+}
+}
+
+void AdhocCheckpoint::DoState(PointerWrap &p) {
+	auto section = p.Section("NelfeAdhoc", 1);
+	if (!section) { p.SetError(p.ERROR_FAILURE); return; }
+	p.DoVoid(&parameter, sizeof(parameter));
+	Do(p, mode); Do(p, state); Do(p, gameSocket); Do(p, gameBufferSize);
+	CheckpointVector(p, peers, 1, [&](SceNetAdhocctlPeerInfo &peer) {
+		p.DoVoid(&peer.nickname, sizeof(peer.nickname));
+		p.DoVoid(&peer.mac_addr, sizeof(peer.mac_addr));
+		p.DoVoid(&peer.padding, sizeof(peer.padding)); p.DoVoid(&peer.flags, sizeof(peer.flags)); p.DoVoid(&peer.last_recv, sizeof(peer.last_recv));
+		p.DoVoid(&peer.ip_addr, sizeof(peer.ip_addr)); p.DoVoid(&peer.port_offset, sizeof(peer.port_offset)); p.DoVoid(&peer.left_at, sizeof(peer.left_at)); p.DoVoid(&peer.visible_at, sizeof(peer.visible_at));
+	});
+	CheckpointVector(p, sockets, MAX_SOCKET, [&](Socket &s) {
+		Do(p, s.slot); Do(p, s.bufferSize); Do(p, s.port);
+		p.DoVoid(&s.mac, sizeof(s.mac));
+		Do(p, s.flags); Do(p, s.alertedFlags); Do(p, s.nonblocking);
+		Do(p, s.isClient); Do(p, s.reliable);
+		CheckpointVector(p, s.queue, 256, [&](Datagram &d) {
+			p.DoVoid(&d.mac, sizeof(d.mac)); Do(p, d.port);
+			CheckpointVector(p, d.data, 10240, [&](u8 &b) { Do(p, b); });
+		});
+	});
+	CheckpointArea(p, master);
+	CheckpointVector(p, replicas, 1, [&](Area &a) { CheckpointArea(p, a); });
+	auto mac = [&](SceNetEtherAddr &m) { p.DoVoid(&m, sizeof(m)); };
+	CheckpointVector(p, macs, 2, mac);
+	CheckpointVector(p, requiredMacs, 2, mac);
+	CheckpointVector(p, peerPorts, 2, [&](std::pair<SceNetEtherAddr, u16> &port) {
+		mac(port.first); Do(p, port.second);
+	});
+}
+
+bool AdhocCheckpoint::Validate(u16 self) const {
+	if (self > 1 || peers.size() != 1 || CheckpointPeer(peers[0].mac_addr) != (self ^ 1) ||
+		peers[0].ip_addr != (self ^ 1) + 1 || peers[0].left_at || !peers[0].last_recv ||
+		CheckpointPeer(parameter.bssid.mac_addr) < 0 ||
+		(state != ADHOCCTL_STATE_CONNECTED && state != ADHOCCTL_STATE_GAMEMODE) ||
+		(mode != ADHOCCTL_MODE_NORMAL && mode != ADHOCCTL_MODE_GAMEMODE) ||
+		gameBufferSize < 0 || gameBufferSize > 0x10000 || sockets.size() > MAX_SOCKET)
+		return false;
+	std::set<u32> slots;
+	std::set<u16> ports;
+	size_t total = 0;
+	for (const auto &s : sockets) {
+		if (s.slot >= MAX_SOCKET || !slots.insert(s.slot).second || !ports.insert(s.port).second ||
+			CheckpointPeer(s.mac) != self || s.bufferSize > 4 * 1024 * 1024 || s.queue.size() > 256)
+			return false;
+		size_t bytes = 0;
+		for (const auto &d : s.queue) {
+			if (CheckpointPeer(d.mac) < 0 || d.data.size() > 10240) return false;
+			bytes += d.data.size();
+		}
+		if (s.port != ADHOC_GAMEMODE_PORT && bytes > s.bufferSize) return false;
+		total += bytes;
+	}
+	if (total > 4 * 1024 * 1024 || (gameSocket > 0 && !slots.count(gameSocket - 1))) return false;
+	auto validArea = [](const Area &a) {
+		return a.value.size >= 0 && a.value.size <= 0x10000 &&
+			a.bytes.size() == (size_t)a.value.size &&
+			(a.bytes.empty() || (CheckpointPeer(a.value.mac) >= 0 && a.value.addr >= 0x08000000 &&
+				u64(a.value.addr) + a.bytes.size() <= 0x0C000000));
+	};
+	if (!validArea(master) || (!master.bytes.empty() && CheckpointPeer(master.value.mac) != self) || replicas.size() > 1)
+		return false;
+	for (const auto &a : replicas)
+		if (!validArea(a) || CheckpointPeer(a.value.mac) != (self ^ 1)) return false;
+	auto validMacs = [](const std::vector<SceNetEtherAddr> &macs) {
+		std::set<int> ids;
+		for (const auto &mac : macs) {
+			int id = CheckpointPeer(mac);
+			if (id < 0 || !ids.insert(id).second) return false;
+		}
+		return true;
+	};
+	if (!validMacs(macs) || !validMacs(requiredMacs)) return false;
+	if (mode == ADHOCCTL_MODE_GAMEMODE && (macs.size() != 2 || master.bytes.empty() || replicas.size() != 1 || gameSocket <= 0))
+		return false;
+	for (const auto &port : peerPorts) if (CheckpointPeer(port.first) < 0) return false;
+	return true;
+}
+
+bool NetAdhocCaptureCheckpoint(AdhocCheckpoint &out, std::string &error) {
+	if (!AdhocControl().IsExternal() || !netAdhocInited || !netAdhocctlInited ||
+		!adhocctlHandle || !adhocctlInServerGroup || isAdhocctlNeedLogin || isAdhocctlBusy ||
+		groupJoinInFlight || abandonedGroupJoins || !adhocctlEvents.empty() || !adhocctlRequests.empty() ||
+		!adhocSocketRequests.empty() || !sendTargetPeers.empty() || __KernelInCallback()) {
+		ERROR_LOG(Log::sceNet, "Checkpoint busy: init=%d ctl=%d handle=%d group=%d login=%d busy=%d join=%d abandoned=%d events=%d ctlreq=%d sockreq=%d send=%d callback=%d",
+			netAdhocInited, netAdhocctlInited, adhocctlHandle != nullptr, adhocctlInServerGroup, (bool)isAdhocctlNeedLogin,
+			isAdhocctlBusy, groupJoinInFlight, abandonedGroupJoins, (int)adhocctlEvents.size(), (int)adhocctlRequests.size(),
+			(int)adhocSocketRequests.size(), (int)sendTargetPeers.size(), __KernelInCallback());
+		error = "Ad hoc connection or syscall still pending";
+		return false;
+	}
+	if (contexts) { error = "Matching checkpoints are not supported"; return false; }
+	for (const auto *s : adhocSockets)
+		if (s && s->type != SOCK_PDP) { error = "PTP checkpoints are not supported"; return false; }
+	// Both reliable streams reached the freeze markers. Move all received PDP payloads to
+	// the PSP-owned queues before capturing them; never lose the first packet after a load.
+	pdpFillQueues();
+	out = {};
+	out.parameter = parameter;
+	out.mode = adhocctlCurrentMode;
+	out.state = adhocctlState;
+	for (auto *peer = friends; peer; peer = peer->next) {
+		out.peers.push_back(*peer);
+		out.peers.back().next = nullptr;
+		if (out.peers.size() > 1) { error = "Checkpoints require exactly two players"; return false; }
+	}
+	for (u32 i = 0; i < MAX_SOCKET; ++i) {
+		auto *s = adhocSockets[i];
+		if (!s) continue;
+		AdhocCheckpoint::Socket saved;
+		saved.slot = i; saved.bufferSize = s->buffer_size;
+		saved.mac = s->data.pdp.laddr; saved.port = s->data.pdp.lport;
+		saved.flags = s->flags; saved.alertedFlags = s->alerted_flags;
+		saved.nonblocking = s->nonblocking; saved.isClient = s->isClient;
+		saved.reliable = s->postofficePdpEnetReliable;
+		for (const auto &d : pdpQueues[s].datagrams) saved.queue.push_back({d.mac, d.port, d.data});
+		out.sockets.push_back(std::move(saved));
+	}
+	auto area = [](const GameModeArea &a) {
+		AdhocCheckpoint::Area result;
+		if (a.data && a.size > 0 && a.size <= 0x10000) {
+			result.value = a;
+			result.value.data = nullptr;
+			result.bytes.assign(a.data, a.data + a.size);
+		}
+		return result;
+	};
+	out.master = area(masterGameModeArea);
+	for (const auto &a : replicaGameModeAreas) out.replicas.push_back(area(a));
+	out.macs = gameModeMacs; out.requiredMacs = requiredGameModeMacs;
+	for (const auto &port : gameModePeerPorts) out.peerPorts.emplace_back(port.first, port.second);
+	out.gameSocket = gameModeSocket; out.gameBufferSize = gameModeBuffSize;
+	SceNetEtherAddr local;
+	getLocalMac(&local);
+	if (!out.Validate(CheckpointPeer(local))) { error = "Unsupported checkpoint roster or GameMode state"; return false; }
+	return true;
+}
+
+bool NetAdhocRestoreCheckpoint(const AdhocCheckpoint &saved) {
+	SceNetEtherAddr local;
+	getLocalMac(&local);
+	int self = CheckpointPeer(local);
+	if (!AdhocControl().IsExternal() || !saved.Validate(self) || !netAdhocInited || !netAdhocctlInited)
+		return false;
+	StopFriendFinder();
+	deleteAllAdhocSockets();
+	deleteAllGMB();
+	gameModePeerPorts.clear();
+	char nicknames[256]{};
+	memcpy(nicknames + self * 128, saved.parameter.nickname.data, 128);
+	memcpy(nicknames + (self ^ 1) * 128, saved.peers[0].nickname.data, 128);
+	adhocctlHandle = AdhocControl().RestoreGroup((const char *)product_code.data,
+		(const char *)saved.parameter.group_name.data, nicknames, CheckpointPeer(saved.parameter.bssid.mac_addr));
+	if (!adhocctlHandle) return false;
+	parameter = saved.parameter;
+	adhocctlCurrentMode = saved.mode; adhocctlState = saved.state;
+	adhocctlInServerGroup = true;
+	isAdhocctlNeedLogin = false;
+	g_adhocServerConnected = true;
+	++adhocctlId;
+	// Rebuild owned nodes; never retain a pointer from the producing process (GBA queue lesson).
+	friends = (SceNetAdhocctlPeerInfo *)calloc(1, sizeof(SceNetAdhocctlPeerInfo));
+	if (!friends) return false;
+	*friends = saved.peers[0];
+	friends->next = nullptr;
+	for (const auto &s : saved.sockets) {
+		int id = Transport().PdpCreate(&s.mac, s.port, s.bufferSize, 0, s.isClient, s.reliable);
+		if (id <= 0) return false;
+		auto *socket = adhocSockets[id - 1];
+		adhocSockets[id - 1] = nullptr;
+		adhocSockets[s.slot] = socket;
+		socket->data.pdp.id = 0x4000 + s.slot;
+		socket->flags = s.flags; socket->alerted_flags = s.alertedFlags; socket->nonblocking = s.nonblocking;
+		auto &q = pdpQueues[socket];
+		for (const auto &d : s.queue) { q.datagrams.push_back({d.mac, d.port, d.data}); q.bytes += (u32)d.data.size(); }
+		socket->data.pdp.rcv_sb_cc = q.bytes;
+	}
+	auto area = [](const AdhocCheckpoint::Area &source, GameModeArea &dest) {
+		dest = source.value;
+		dest.data = nullptr;
+		if (source.bytes.empty()) return true;
+		if (!Memory::IsValidRange(dest.addr, dest.size)) return false;
+		dest.data = (u8 *)malloc(source.bytes.size());
+		if (!dest.data) return false;
+		memcpy(dest.data, source.bytes.data(), source.bytes.size());
+		return true;
+	};
+	if (!area(saved.master, masterGameModeArea)) return false;
+	for (const auto &a : saved.replicas) {
+		replicaGameModeAreas.emplace_back();
+		if (!area(a, replicaGameModeAreas.back())) return false;
+	}
+	gameModeMacs = saved.macs; requiredGameModeMacs = saved.requiredMacs;
+	for (const auto &port : saved.peerPorts) gameModePeerPorts.emplace(port);
+	gameModeSocket = saved.gameSocket;
+	gameModeBuffSize = saved.gameBufferSize;
+	if (gameModeBuffSize) {
+		gameModeBuffer = (u8 *)calloc(1, gameModeBuffSize);
+		if (!gameModeBuffer) return false;
+	}
+	// CoreTiming has restored the poll/GameMode events and emulated timestamps already.
+	// Do not rejoin via friendFinderPoll: that would emit another CONNECT and reset game state.
+	StartFriendFinder();
+	return true;
 }
 
 void __NetAdhocDoState(PointerWrap &p) {

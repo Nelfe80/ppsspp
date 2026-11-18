@@ -312,6 +312,8 @@ public:
 	virtual bool IsExternal() const { return false; }
 	virtual std::unique_ptr<AdhocTransport> CreateDataTransport() { return {}; }
 	virtual bool GetLocalMac(u8 mac[6]) { return false; }
+	// Optional, external two-player checkpoint restoration. CPU is paused; no PSP callbacks.
+	virtual void *RestoreGroup(const char *game, const char *group, const char *nicknames, u16 leader) { return nullptr; }
 	virtual void *Login(const adhocctl_addr_v4 *server, const adhocctl_addr_v4 *bind, const char *game, const char *nick, const char *mac, bool udp, bool (*abort)(void *), void *arg) {
 		return create_adhocctl_v1_session_v4(server, bind, game, nick, mac, udp, abort, arg);
 	}

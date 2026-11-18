@@ -4,6 +4,7 @@ set(LIBRETRO_SRCS
 	LibretroNetpacket.cpp
 	NetpacketAdhoc.cpp
 	NetpacketTransport.cpp
+	NetpacketCheckpoint.cpp
 	LibretroGraphicsContext.cpp
 	LibretroGLContext.cpp
 	LibretroGLCoreContext.cpp

@@ -707,6 +707,26 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "disabled"
    },
    {
+      "ppsspp_retroarch_netplay_start",
+      "NelfePlay Challenge Start (Restart)",
+      NULL,
+      "Load this player's prepared checkpoint from PPSSPP/netplay/<game ID>.state and wait for both players. Requires a coordinated capture made with this exact core build. A missing or incompatible state stops the challenge.",
+      NULL,
+      "network",
+      BOOL_OPTIONS,
+      "disabled"
+   },
+   {
+      "ppsspp_retroarch_netplay_capture",
+      "Capture NelfePlay Checkpoint (Host)",
+      NULL,
+      "Switch on during a two-player PDP/GameMode session to pause both consoles and save their states in PPSSPP/netplay/captures. PTP, matching and pending network calls are unsupported. Switch off before another capture.",
+      NULL,
+      "network",
+      BOOL_OPTIONS,
+      "disabled"
+   },
+   {
       "ppsspp_enable_wlan",
       "Enable Networking/WLAN (Beta, may break games)",
       NULL,

@@ -42,6 +42,9 @@ static std::string systemDir, saveDir;
 static bool quit = false, enabled = true, supported = true;
 static std::atomic<bool> gameExited{false};
 static unsigned frames = 0, receivedPackets = 0;
+static bool checkpointLoad = false, checkpointCapture = false, checkpointRequested = false;
+static std::atomic<unsigned> captureAt{0};
+static std::atomic<unsigned> firstPspOutputAt{0};
 static std::thread::id frontendThread;
 static void Check(bool value, const char *message) {
 	if (!value) {
@@ -60,6 +63,8 @@ static void RETRO_CALLCONV Log(enum retro_log_level, const char *format, ...) {
 	if (strstr(message, "[sceKernel] sceKernelExitGame")) {
 		gameExited = true;
 	}
+	if (strstr(message, "Running for 3 seconds:")) captureAt = frames + 30;
+	if (strstr(message, "[sceIo] sceNetAdhocInit:")) firstPspOutputAt = frames;
 	vfprintf(stderr, format, args);
 	va_end(args);
 }
@@ -77,6 +82,10 @@ static bool RETRO_CALLCONV Environment(unsigned cmd, void *data) {
 		auto variable = static_cast<retro_variable *>(data);
 		if (!strcmp(variable->key, "ppsspp_retroarch_netplay"))
 			variable->value = enabled ? "enabled" : "disabled";
+		else if (!strcmp(variable->key, "ppsspp_retroarch_netplay_start"))
+			variable->value = checkpointLoad ? "enabled" : "disabled";
+		else if (!strcmp(variable->key, "ppsspp_retroarch_netplay_capture"))
+			variable->value = checkpointRequested ? "enabled" : "disabled";
 		else if (!strcmp(variable->key, "ppsspp_cpu_core"))
 			variable->value = "Interpreter";
 		else if (!strcmp(variable->key, "ppsspp_backend"))
@@ -100,6 +109,9 @@ static bool RETRO_CALLCONV Environment(unsigned cmd, void *data) {
 		return true;
 	case RETRO_ENVIRONMENT_SHUTDOWN:
 		quit = true;
+		return true;
+	case RETRO_ENVIRONMENT_SET_MESSAGE:
+		fprintf(stderr, "[frontend] %s\n", static_cast<retro_message *>(data)->msg);
 		return true;
 	default:
 		return false;
@@ -149,6 +161,8 @@ int main(int argc, char **argv) {
 	frontendThread = std::this_thread::get_id();
 	systemDir = argv[3];
 	saveDir = argv[4];
+	checkpointLoad = argc > 8 && !strncmp(argv[8], "resume", 6);
+	checkpointCapture = argc > 8 && !strcmp(argv[8], "capture");
 	if (argc > 5) {
 		enabled = strcmp(argv[5], "disabled") != 0;
 		supported = strcmp(argv[5], "unsupported") != 0;
@@ -169,6 +183,7 @@ int main(int argc, char **argv) {
 	LOAD(retro_set_environment); LOAD(retro_set_video_refresh); LOAD(retro_set_audio_sample_batch);
 	LOAD(retro_set_input_poll); LOAD(retro_set_input_state); LOAD(retro_init); LOAD(retro_deinit);
 	LOAD(retro_load_game); LOAD(retro_unload_game); LOAD(retro_run); LOAD(retro_serialize_size);
+	LOAD(retro_serialize); LOAD(retro_unserialize);
 	retro_set_environment(Environment);
 	retro_set_video_refresh(Video);
 	retro_set_audio_sample_batch(Audio);
@@ -185,27 +200,34 @@ int main(int argc, char **argv) {
 	}
 	Check(loaded, "content loads");
 #ifndef _WIN32
-	if (argc == 8 && !strcmp(argv[5], "pair")) {
+	if (argc >= 8 && !strcmp(argv[5], "pair")) {
 		pairId = (uint16_t)atoi(argv[6]);
 		pairSocket = atoi(argv[7]);
 		Check(pairId <= 1 && pairSocket >= 0 && callbacks.start, "pair setup");
-		callbacks.start(pairId, PairSend, PairReceive);
+		if (!(argc > 8 && !strcmp(argv[8], "resume-missing") && pairId == 1))
+			callbacks.start(pairId, PairSend, PairReceive);
 		if (pairId == 0) {
 			Check(callbacks.connected(1), "pair client accepted");
+			if (argc > 8 && !strcmp(argv[8], "resume-disconnect")) callbacks.disconnected(1);
 		}
-		auto start = std::chrono::steady_clock::now();
-		for (int frame = 0; frame < 1200 && !quit && !gameExited; frame++) {
+		const int maxFrames = argc > 9 ? atoi(argv[9]) : 1200;
+		for (int frame = 0; frame < maxFrames && !quit && !gameExited; frame++) {
+			auto frameStart = std::chrono::steady_clock::now();
+			if (checkpointCapture && pairId == 0 && captureAt && frames >= captureAt)
+				checkpointRequested = true;
 			PairReceive();
 			callbacks.poll();
 			retro_run();
-			std::this_thread::sleep_until(start + std::chrono::microseconds((frame + 1) * 1000000LL / 60));
+			// A state write/load may take many frame intervals. Do not fast-forward
+			// to repay that wall time: it would flood the other paused console.
+			std::this_thread::sleep_until(frameStart + std::chrono::microseconds(1000000 / 60));
 		}
 		// Deliver the PSP's final leave/logout messages before stopping the session.
 		callbacks.poll();
 		callbacks.stop();
 		retro_unload_game();
 		retro_deinit();
-		Check(receivedPackets > 0 && frames > 0, "pair exchanged packets and produced frames");
+		Check((receivedPackets > 0 || checkpointLoad) && frames > 0, "pair exchanged packets and produced frames");
 		printf("PASS pair frontend, id=%u frames=%u packets=%u\n", pairId, frames, receivedPackets);
 		return 0;
 	}
@@ -214,6 +236,8 @@ int main(int argc, char **argv) {
 	if (enabled) {
 		Check(callbacks.start && callbacks.receive && callbacks.poll, "Netpacket registered");
 		Check(retro_serialize_size() == 0, "savestates disabled in packet mode");
+		char stateProbe = 0;
+		Check(!retro_serialize(&stateProbe, 1) && !retro_unserialize(&stateProbe, 1), "ordinary packet-mode state APIs rejected");
 		callbacks.start(0, Send, Receive);
 		Check(callbacks.connected(1), "second player accepted");
 		peer.Start(1);
@@ -244,13 +268,23 @@ int main(int argc, char **argv) {
 				foundData = true;
 		}
 		retro_run();
-		if ((foundPeer && foundData && frames > 120) || (!enabled && frames > 120))
+		if ((foundPeer && foundData && frames > 120) ||
+			(!enabled && firstPspOutputAt && frames > firstPspOutputAt + 5))
 			break;
 		std::this_thread::sleep_for(std::chrono::milliseconds(2));
 	}
 	if (enabled) {
 		callbacks.disconnected(1);
 		callbacks.stop();
+	} else {
+		size_t stateSize = retro_serialize_size();
+		Check(stateSize > 0 && stateSize < 512 * 1024 * 1024, "ordinary state size");
+		std::vector<uint8_t> state(stateSize);
+		Check(retro_serialize(state.data(), state.size()), "ordinary state saved");
+		for (int i = 0; i < 5; ++i) retro_run();
+		Check(retro_unserialize(state.data(), state.size()), "ordinary state loaded");
+		for (int i = 0; i < 5; ++i) retro_run();
+		puts("PASS ordinary savestate round-trip with Netplay disabled");
 	}
 	retro_unload_game();
 	if (enabled) {

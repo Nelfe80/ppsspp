@@ -1,0 +1,63 @@
+name: NelfePlay Netpacket Windows x64
+
+on:
+  push:
+    branches: [nelfeplay-netpacket-resume]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check out submodules
+        shell: bash
+        run: .github/checkout-submodules.sh
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e
+        with:
+          msystem: MINGW64
+          path-type: inherit
+          install: make
+          suppress-deprecation-warnings: msystem-mingw64 msystem-mingw32
+      - name: Build libretro core
+        shell: msys2 {0}
+        run: |
+          VS_PATH=$(sh libretro/VSWhere.sh -latest -property installationPath)
+          test -n "$VS_PATH"
+          make -C libretro -f Makefile -j4 platform=windows_msvc2019_desktop_x64 VsInstallRoot="$(cygpath -u "$VS_PATH")"
+      - name: Build and run transport tests
+        shell: pwsh
+        run: |
+          cmake -S libretro/tests -B build-netpacket-tests -A x64
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build build-netpacket-tests --config Release --parallel 4
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ctest --test-dir build-netpacket-tests -C Release --output-on-failure
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Smoke-test the Windows DLL
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force smoke/system, smoke/saves | Out-Null
+          Copy-Item assets smoke/system/PPSSPP -Recurse
+          $core = (Resolve-Path libretro/ppsspp_libretro.dll).Path
+          $program = (Resolve-Path pspautotests/tests/net/adhoc/self.prx).Path
+          $system = (Resolve-Path smoke/system).Path
+          $saves = (Resolve-Path smoke/saves).Path
+          foreach ($mode in @('enabled', 'disabled', 'unsupported')) {
+            & build-netpacket-tests/Release/NetpacketCoreSmoke.exe $core $program $system $saves $mode
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+      - name: Package the experimental core
+        shell: pwsh
+        run: python libretro/package_nelfeplay.py libretro/ppsspp_libretro.dll --output dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: PPSSPP-Netplay-RetroBat-x64-experimental
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30

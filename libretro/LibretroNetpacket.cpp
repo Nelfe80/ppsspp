@@ -19,6 +19,7 @@
 #include "libretro/NetpacketAdhoc.h"
 #include "Core/HLE/AdhocTransport.h"
 #include "libretro/NetpacketTransport.h"
+#include "libretro/NetpacketCheckpoint.h"
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
 #include <cstring>
@@ -35,6 +36,9 @@ public:
 	bool GetLocalMac(u8 mac[6]) override {
 		transport.LocalMac(mac);
 		return true;
+	}
+	void *RestoreGroup(const char *game, const char *group, const char *nicknames, u16 leader) override {
+		return transport.RestoreGroup(game, group, nicknames, leader);
 	}
 	void *Login(const adhocctl_addr_v4 *, const adhocctl_addr_v4 *, const char *game, const char *nick, const char *, bool, bool (*abort)(void *), void *arg) override {
 		while (!transport.Active()) {
@@ -69,9 +73,11 @@ void RETRO_CALLCONV Start(uint16_t id, retro_netpacket_send_t send, retro_netpac
 	localId = id;
 	transport.Start(id);
 	sendPacket = send;
+	CheckpointStart(id);
 }
 void RETRO_CALLCONV Receive(const void *data, size_t size, uint16_t from) {
-	transport.Receive(data, size, from);
+	if (!CheckpointReceive(data, size, from))
+		transport.Receive(data, size, from);
 }
 void RETRO_CALLCONV Stop() {
 	NetpacketStop();
@@ -80,13 +86,16 @@ void RETRO_CALLCONV Poll() {
 	NetpacketPoll();
 }
 bool RETRO_CALLCONV Connected(uint16_t id) {
-	return transport.Connected(id);
+	bool accepted = transport.Connected(id);
+	if (accepted) CheckpointConnected(id);
+	return accepted;
 }
 void RETRO_CALLCONV Disconnected(uint16_t id) {
+	CheckpointDisconnected(id);
 	transport.Disconnected(id);
 }
 const retro_netpacket_callback callbacks = {
-	Start, Receive, Stop, Poll, Connected, Disconnected, "ppsspp-adhoc-experimental-2",
+	Start, Receive, Stop, Poll, Connected, Disconnected, "ppsspp-nelfeplay-checkpoint-1",
 };
 }
 
@@ -105,6 +114,15 @@ void NetpacketConfig() {
 
 bool NetpacketEnabled() {
 	return enabled;
+}
+
+bool NetpacketActive() { return transport.Active(); }
+bool NetpacketCheckpointReady() { return transport.CheckpointReady(); }
+void NetpacketSendCheckpoint(const void *data, size_t size) {
+	if (sendPacket && localId <= 1) {
+		sendPacket(RETRO_NETPACKET_RELIABLE, data, size, localId ^ 1);
+		sendPacket(RETRO_NETPACKET_FLUSH_HINT, nullptr, 0, RETRO_NETPACKET_BROADCAST);
+	}
 }
 
 bool NetpacketInit(retro_environment_t environment) {
@@ -150,6 +168,7 @@ void NetpacketPoll() {
 		sendPacket(RETRO_NETPACKET_FLUSH_HINT, nullptr, 0, RETRO_NETPACKET_BROADCAST);
 }
 void NetpacketStop() {
+	CheckpointStop();
 	sendPacket = nullptr;
 	transport.Stop();
 }

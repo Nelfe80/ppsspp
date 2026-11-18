@@ -1,6 +1,7 @@
 #include "ppsspp_config.h"
 #include "libretro/LibretroVR.h"
 #include "libretro/LibretroNetpacket.h"
+#include "libretro/NetpacketCheckpoint.h"
 #include <array>
 #include <cstring>
 #include <cassert>
@@ -1598,6 +1599,7 @@ bool retro_load_game(const struct retro_game_info *game) {
       return false;
    }
 
+   Libretro::CheckpointInit(environ_cb, game->path);
    retro_check_backend();
 
    ctx       = LibretroGraphicsContext::CreateGraphicsContext();
@@ -1843,6 +1845,16 @@ void retro_run(void) {
 
          free(unserialize_data);
          unserialize_data = NULL;
+      }
+   }
+
+   if (Libretro::CheckpointNeeded()) {
+      if (useEmuThread)
+         EmuThreadPause();
+      if (Libretro::CheckpointFrame()) {
+         retro_input();
+         ctx->SwapBuffers();
+         return;
       }
    }
 

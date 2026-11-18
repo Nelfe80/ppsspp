@@ -274,6 +274,49 @@ void NetpacketAdhoc::LocalMac(uint8_t *mac) {
 	std::lock_guard<std::mutex> guard(s_->mutex);
 	Mac(s_->self, mac);
 }
+
+bool NetpacketAdhoc::CheckpointReady() {
+	std::lock_guard<std::mutex> guard(s_->mutex);
+	if (!s_->active || s_->self > 1 || !s_->control || s_->control->dead ||
+		!s_->control->events.empty() || !s_->outgoing.empty() ||
+		s_->peers != std::set<uint16_t>{uint16_t(s_->self ^ 1)})
+		return false;
+	for (const auto &entry : s_->sockets) {
+		if (entry.second->type != State::CONTROL &&
+			(entry.second->type != State::PDP || !entry.second->datagrams.empty()))
+			return false;
+	}
+	return true;
+}
+
+void *NetpacketAdhoc::RestoreGroup(const char *game, const char *group, const char *nicknames, uint16_t leader) {
+	std::lock_guard<std::mutex> guard(s_->mutex);
+	if (!s_->active || s_->self > 1 || leader > 1 || !s_->sockets.empty())
+		return nullptr;
+	// Fresh endpoints on both consoles. No old pointers, IDs or pending discovery events survive.
+	s_->nextId = 1;
+	s_->outgoing.clear();
+	s_->queued = 0;
+	s_->players.clear();
+	s_->peers = {uint16_t(s_->self ^ 1)};
+	s_->control = s_->New(State::CONTROL);
+	if (!s_->control)
+		return nullptr;
+	if (s_->self == 0) {
+		for (uint16_t id = 0; id < 2; ++id) {
+			State::Player p;
+			p.control = 1;
+			memcpy(p.game.data(), game, 9);
+			memcpy(p.group.data(), group, 8);
+			memcpy(p.nickname.data(), nicknames + id * 128, 128);
+			p.nickname.back() = 0;
+			p.joined = true;
+			p.leader = leader;
+			s_->players.emplace(id, p);
+		}
+	}
+	return s_->control;
+}
 std::vector<NetpacketAdhoc::Packet> NetpacketAdhoc::TakePackets() {
 	std::lock_guard<std::mutex> guard(s_->mutex);
 	std::vector<Packet> packets;

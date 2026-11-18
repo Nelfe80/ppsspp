@@ -25,4 +25,7 @@ void NetpacketConfig();
 void NetpacketPoll();
 void NetpacketStop();
 void NetpacketShutdown();
+bool NetpacketActive();
+bool NetpacketCheckpointReady();
+void NetpacketSendCheckpoint(const void *data, size_t size);
 }

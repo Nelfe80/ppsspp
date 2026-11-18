@@ -1083,6 +1083,7 @@ SOURCES_CXX += \
 		$(LIBRETRODIR)/LibretroNetpacket.cpp \
 		$(LIBRETRODIR)/NetpacketAdhoc.cpp \
 		$(LIBRETRODIR)/NetpacketTransport.cpp \
+		$(LIBRETRODIR)/NetpacketCheckpoint.cpp \
 		$(LIBRETRODIR)/LibretroGraphicsContext.cpp \
 		$(LIBRETRODIR)/LibretroGLContext.cpp \
 		$(LIBRETRODIR)/LibretroGLCoreContext.cpp \

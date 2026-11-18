@@ -43,6 +43,8 @@ public:
 	std::vector<Packet> TakePackets();
 	void LocalMac(uint8_t *mac);
 	bool Active();
+	bool CheckpointReady();
+	void *RestoreGroup(const char *game, const char *group, const char *nicknames, uint16_t leader);
 
 	void *ControlCreate(const char *game, const char *nickname);
 	void ControlDestroy(void *handle);
