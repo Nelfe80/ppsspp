@@ -4,6 +4,44 @@ This is downstream work for the NelfePlay fork. The upstream Netpacket branch
 keeps `retro_serialize_size`, `retro_serialize` and `retro_unserialize` disabled
 while Netplay is enabled. Nothing in this document enables loading a state.
 
+## Current launcher contract
+
+Reviewed on 2026-11-18 against `Nelfe80/RetroBat-APIExpose` at
+`ea98f9b63b7dc684b6d67856bec7b0f8899cdc27` and `Nelfe80/RetroArch` at
+`c58d703a2e6982e1508952acebab2dcc888c4dca`. This is a source compatibility
+review, not an end-to-end Windows test. The new transport branch is not a
+replacement for the currently packaged NelfePlay core until the start-state
+loader below exists and has been tested.
+
+| Existing contract | Requirement for the new downstream core |
+| --- | --- |
+| `MultiplayerCoeursService` installs `ppsspp_netplay_libretro.dll` and its matching info/license files, separately from solo PPSSPP. | Keep the packaged core identity. Test the candidate separately before replacing the working package. |
+| The legacy core exposes `ppsspp_retroarch_netplay_start`. The new upstream transport branch does not. | Restore this option only with a working loader and readiness barrier. Advertising an ignored option would allow a requested challenge to start at the game menu. |
+| `MultiplayerDepartDuCoeur` places each seat's file at `core_start.path` below the RetroArch system directory (`bios` in RetroBat), e.g. `PPSSPP/netplay/ULUS10121.state`. | Preserve the configured per-game path and one-load-per-content behavior. A core without this capability must not be selected for a `core_start` challenge. |
+| The API verifies the catalogue SHA-256 on the delivered file, then decompresses `.gz` files before placing them. | Distinguish the archive hash from the installed raw-state hash in a new manifest; never compare these two representations as if identical. |
+| `core_start.content` identifies the ROM by MD5, with `players` and one state for each `seat`. | Retain these checks when extending the manifest with core-build, state-format and checkpoint identity. A title or shared game ID is not enough to identify a compatible ROM revision. |
+| `MultiplayerOrdreNetplay` already permutes two-player state seats, scores and statistics when the host is platform seat 2. | Consume that mapping once. Do not apply a second host/seat permutation inside the core. More than two players need an explicit saved-seat/live-peer mapping. |
+| The API removes the previous prepared state and rejects a missing or changed seat file. | Retain cleanup and fail-closed behavior. Add core capability/build checks before launch, and never release a partially restored roster. |
+
+The current RetroArch fork has the Netpacket start, poll, receive and protocol
+version callbacks used by this transport. It deliberately excludes packet
+sessions from its normal savestate synchronization and load path. Restoring
+`retro_unserialize()` alone therefore does not implement NelfePlay starts:
+the downstream core must load its own prepared state after boot and coordinate
+with the other cores.
+
+The transport's `ppsspp-adhoc-experimental-2` protocol identifier also means
+the new core must be installed on every participant; it must not be mixed
+with the previous `experimental-1` core.
+
+Public source references for this contract:
+
+- [Core installation](https://github.com/Nelfe80/RetroBat-APIExpose/blob/ea98f9b63b7dc684b6d67856bec7b0f8899cdc27/src/RetroBat.Api/Multiplayer/MultiplayerCoeursService.cs)
+- [Prepared state files](https://github.com/Nelfe80/RetroBat-APIExpose/blob/ea98f9b63b7dc684b6d67856bec7b0f8899cdc27/src/RetroBat.Api/Multiplayer/MultiplayerDepartDuCoeur.cs)
+- [Seat mapping](https://github.com/Nelfe80/RetroBat-APIExpose/blob/ea98f9b63b7dc684b6d67856bec7b0f8899cdc27/src/RetroBat.Api/Multiplayer/MultiplayerOrdreNetplay.cs)
+- [Catalogue types and validation](https://github.com/Nelfe80/RetroBat-APIExpose/blob/ea98f9b63b7dc684b6d67856bec7b0f8899cdc27/src/RetroBat.Api/Multiplayer/MultiplayerCatalogue.cs)
+- [RetroArch packet lifecycle and state handling](https://github.com/Nelfe80/RetroArch/blob/c58d703a2e6982e1508952acebab2dcc888c4dca/network/netplay/netplay_frontend.c)
+
 ## Preserved prototype
 
 `Nelfe80/ppsspp:nelfeplay-netplay`, commit
@@ -84,6 +122,12 @@ queues, callbacks and timing state.
    tests demonstrate a consistent checkpoint.
 5. Run ordinary savestate and Netplay-disabled regression tests, then repeat on
    Windows/RetroBat and two separate machines.
+6. Exercise the current API's `MultiplayerDepartDuCoeurTests` and
+   `MultiplayerOrdreNetplayTests`, then launch through the API with the host in
+   each platform seat. Verify gzip/hash handling, prepared-state cleanup, the
+   core start option, the displayed player identity and the reported scores.
+   A missing start capability, wrong build or legacy state must reject the
+   challenge before either PSP advances.
 
 The existing `libretro/tests/core_pair.py` harness supplies the two-process
 frontend for the first integration tests. Extend it with coordinated pause,
