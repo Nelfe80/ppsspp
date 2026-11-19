@@ -301,8 +301,15 @@ bool CheckpointFrame() {
 		}
 		return false;
 	}
-	if (!deadline) deadline = time_now_d() + 60;
-	if (phase != Phase::Failed && time_now_d() > deadline) Fail("Checkpoint timed out; restart the session to retry");
+	// A capture is bounded from its start. A challenge start waits without limit for the other player to join the
+	// RetroArch session (a launcher can take longer than a minute to bring a slower machine in), then is bounded.
+	if (!deadline) {
+		bool resuming = phase == Phase::Load || phase == Phase::WaitPrepare || phase == Phase::WaitReady;
+		bool together = started && (self != 0 || peerConnected);
+		if (!resuming || together)
+			deadline = time_now_d() + 60;
+	}
+	if (phase != Phase::Failed && deadline && time_now_d() > deadline) Fail("Checkpoint timed out; restart the session to retry");
 	if (phase != Phase::Failed && started && !NetpacketActive()) Fail("Packet transport stopped");
 	// Called only after pausing the CPU and draining its render work. Reliable packet ordering
 	// makes PREPARE/FROZEN markers delimit all application data sent before each local pause.
@@ -331,7 +338,8 @@ bool CheckpointFrame() {
 		Notice(saved ? "Both checkpoint files saved in PPSSPP/netplay/captures" : "NelfePlay: both players ready");
 	}
 	if (phase != Phase::Idle && time_now_d() - lastMessage > 3) {
-		Notice(phase == Phase::Failed ? "NelfePlay: " + failure + ". Restart content to retry." : "NelfePlay: waiting for both players' checkpoints...");
+		Notice(phase == Phase::Failed ? "NelfePlay: " + failure + ". Restart content to retry." :
+			!deadline ? "NelfePlay: waiting for the other player to join..." : "NelfePlay: waiting for both players' checkpoints...");
 		lastMessage = time_now_d();
 	}
 	return phase != Phase::Idle;
