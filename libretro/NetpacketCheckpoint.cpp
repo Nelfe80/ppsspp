@@ -48,7 +48,7 @@ bool identityAssigned = false;
 bool peerReady = false, prepareReceived = false;
 Token generation{}, checkpoint{};
 std::string content, failure;
-double deadline = 0, lastMessage = 0;
+double deadline = 0, lastMessage = 0, lastRequestCheck = 0;
 
 u32 Read32(const u8 *p) { return u32(p[0]) | u32(p[1]) << 8 | u32(p[2]) << 16 | u32(p[3]) << 24; }
 void Write32(u8 *p, u32 n) { for (int i = 0; i < 4; ++i) p[i] = n >> (8 * i); }
@@ -202,7 +202,7 @@ void CheckpointInit(retro_environment_t env, const char *path) {
 	environment = env; content = path ? path : "";
 	self = 65535; started = peerConnected = loaded = saved = peerReady = prepareReceived = false;
 	identityAssigned = false;
-	generation = {}; checkpoint = {}; failure.clear(); deadline = lastMessage = 0;
+	generation = {}; checkpoint = {}; failure.clear(); deadline = lastMessage = lastRequestCheck = 0;
 	captureLatched = false;
 	phase = Option("ppsspp_retroarch_netplay_start") ? Phase::Load : Phase::Idle;
 	if (phase != Phase::Idle && !NetpacketEnabled()) Fail("Challenge start requires RetroArch Netplay", false);
@@ -266,7 +266,19 @@ bool CheckpointReceive(const void *data, size_t size, uint16_t from) {
 
 bool CheckpointNeeded() {
 	bool capture = Option("ppsspp_retroarch_netplay_capture");
-	if (phase == Phase::Idle && NetpacketEnabled() && started && self == 0 && capture && !captureLatched) {
+	// A tool (or a lab operator) can also ask the host for a capture without opening the frontend's menu, which would
+	// pause the host's PSP and break GameMode on the other side: PPSSPP/netplay/capture.request, removed when seen.
+	bool requested = false;
+	if (phase == Phase::Idle && NetpacketEnabled() && started && self == 0 && time_now_d() - lastRequestCheck > 0.5) {
+		lastRequestCheck = time_now_d();
+		Path request = g_Config.internalDataDirectory / "netplay" / "capture.request";
+		if (File::Exists(request)) {
+			File::Delete(request);
+			requested = true;
+			INFO_LOG(Log::sceNet, "NelfePlay checkpoint: capture requested by %s", request.c_str());
+		}
+	}
+	if (phase == Phase::Idle && NetpacketEnabled() && started && self == 0 && ((capture && !captureLatched) || requested)) {
 		generation = checkpoint = NewToken();
 		peerReady = saved = false;
 		phase = Phase::FreezeHost;
