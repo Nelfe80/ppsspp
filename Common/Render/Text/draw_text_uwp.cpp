@@ -11,7 +11,7 @@
 #include "Common/StringUtils.h"
 #include "Common/File/Path.h"
 
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(__LIBRETRO__)
 
 #include <string>
 
