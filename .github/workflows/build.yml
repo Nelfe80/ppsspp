@@ -1,3 +1,4 @@
+# Fork validation for PR #23107: build and test its exact source commit.
 name: Build
 
 on:
@@ -35,6 +36,8 @@ jobs:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v7
+      with:
+        ref: 9210d0741ab56ca750bee339e81a0ec840aeef78
 
     - name: Check out submodules
       shell: bash
@@ -128,6 +131,8 @@ jobs:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v7
+      with:
+        ref: 9210d0741ab56ca750bee339e81a0ec840aeef78
 
     - name: Check out submodules
       shell: bash
@@ -165,6 +170,8 @@ jobs:
     timeout-minutes: 90
     steps:
     - uses: actions/checkout@v7
+      with:
+        ref: 9210d0741ab56ca750bee339e81a0ec840aeef78
 
     - name: Check out submodules
       shell: bash
@@ -202,6 +209,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7
       with:
+        ref: 9210d0741ab56ca750bee339e81a0ec840aeef78
         submodules: false
 
     - name: Fetch tests
@@ -363,6 +371,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v7
+      with:
+        ref: 9210d0741ab56ca750bee339e81a0ec840aeef78
 
     - name: Check out submodules
       shell: bash
@@ -612,6 +622,8 @@ jobs:
         apk add build-base wget git bash cmake python3 glu-dev sdl3-dev sdl3_ttf-dev curl-dev tar zstd
 
     - uses: actions/checkout@v7
+      with:
+        ref: 9210d0741ab56ca750bee339e81a0ec840aeef78
 
 
     - name: Fix git detected dubious ownership in repository
